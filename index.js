@@ -2,23 +2,26 @@ require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
-const { Server } = require('socket.io');
 const session = require('express-session');
 const passport = require('passport');
 const mongoose = require('mongoose');
-const User = require('./models/User');
-const initGoogleAuth = require('./auth/google');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const Message = require('./models/Message');
+const { Server } = require('socket.io');
 
-// Create express app and server
+const User = require('./models/User');
+const Message = require('./models/Message');
+const initGoogleAuth = require('./auth/google');
+
+// Create express app
 const app = express();
 app.use(express.json());
-const server = http.createServer(app);
-
-// Allow Flutter frontend to connect
 app.use(cors());
+
+// Health‑check endpoint
+app.get('/', (req, res) => {
+  res.send('Chat server is up and running 🚀');
+});
 
 // Session middleware
 app.use(session({
@@ -30,11 +33,11 @@ app.use(session({
 // Passport middleware
 app.use(passport.initialize());
 app.use(passport.session());
+initGoogleAuth(); // Configure Google OAuth
 
-// Initialize Google OAuth
-initGoogleAuth();
+// --- AUTH ROUTES ---
 
-// Google OAuth routes
+// Google OAuth
 app.get('/auth/google',
   passport.authenticate('google', { scope: ['profile', 'email'] })
 );
@@ -42,15 +45,24 @@ app.get('/auth/google',
 app.get('/auth/google/callback',
   passport.authenticate('google', { failureRedirect: '/login', session: true }),
   (req, res) => {
-    // Create a JWT for the user
-    const token = jwt.sign({ id: req.user._id, email: req.user.email }, process.env.JWT_SECRET || 'jwtsecret', { expiresIn: '7d' });
-    // Redirect to your app with token and user info
-    const redirectUrl = `myapp://auth?token=${token}&id=${req.user._id}&name=${encodeURIComponent(req.user.name)}&email=${encodeURIComponent(req.user.email)}&avatar=${encodeURIComponent(req.user.avatar || '')}`;
+    // Issue a JWT
+    const token = jwt.sign(
+      { id: req.user._id, email: req.user.email },
+      process.env.JWT_SECRET || 'jwtsecret',
+      { expiresIn: '7d' }
+    );
+    // Redirect back to the app via custom URI scheme
+    const redirectUrl = `myapp://auth`
+      + `?token=${token}`
+      + `&id=${req.user._id}`
+      + `&name=${encodeURIComponent(req.user.name)}`
+      + `&email=${encodeURIComponent(req.user.email)}`
+      + `&avatar=${encodeURIComponent(req.user.avatar || '')}`;
     res.redirect(redirectUrl);
   }
 );
 
-// Logout route
+// Logout
 app.get('/auth/logout', (req, res) => {
   req.logout(() => {
     res.redirect('/');
@@ -62,11 +74,12 @@ app.get('/auth/current_user', (req, res) => {
   res.json(req.user || null);
 });
 
-// Middleware to verify JWT
+// JWT verification middleware
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
+  const token = authHeader?.split(' ')[1];
   if (!token) return res.status(401).json({ message: 'No token provided.' });
+
   jwt.verify(token, process.env.JWT_SECRET || 'jwtsecret', (err, user) => {
     if (err) return res.status(403).json({ message: 'Invalid token.' });
     req.user = user;
@@ -74,7 +87,7 @@ function authenticateToken(req, res, next) {
   });
 }
 
-// Update profile endpoint
+// Update profile
 app.put('/profile', authenticateToken, async (req, res) => {
   try {
     const { name, avatar } = req.body;
@@ -89,7 +102,7 @@ app.put('/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// Get all users (for Home screen)
+// List all users
 app.get('/users', async (req, res) => {
   try {
     const users = await User.find({}, 'name email avatar');
@@ -99,7 +112,7 @@ app.get('/users', async (req, res) => {
   }
 });
 
-// Signup endpoint
+// Signup
 app.post('/signup', async (req, res) => {
   try {
     const { name, email, password } = req.body;
@@ -111,7 +124,7 @@ app.post('/signup', async (req, res) => {
       return res.status(409).json({ message: 'User already exists.' });
     }
     const hashedPassword = await bcrypt.hash(password, 10);
-    const user = await User.create({ name, email, password: hashedPassword });
+    await User.create({ name, email, password: hashedPassword });
     res.status(201).json({ message: 'User created successfully.' });
   } catch (err) {
     console.error('Signup error:', err);
@@ -119,7 +132,7 @@ app.post('/signup', async (req, res) => {
   }
 });
 
-// Login endpoint
+// Login
 app.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -131,18 +144,23 @@ app.post('/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid credentials.' });
     }
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(401).json({ message: 'Invalid credentials.' });
-    }
-    // Create JWT token
-    const token = jwt.sign({ id: user._id, email: user.email }, process.env.JWT_SECRET || 'jwtsecret', { expiresIn: '7d' });
-    res.json({ token, user: { id: user._id, name: user.name, email: user.email, avatar: user.avatar } });
+    if (!isMatch) return res.status(401).json({ message: 'Invalid credentials.' });
+
+    const token = jwt.sign(
+      { id: user._id, email: user.email },
+      process.env.JWT_SECRET || 'jwtsecret',
+      { expiresIn: '7d' }
+    );
+    res.json({
+      token,
+      user: { id: user._id, name: user.name, email: user.email, avatar: user.avatar }
+    });
   } catch (err) {
     res.status(500).json({ message: 'Server error.' });
   }
 });
 
-// Send a message
+// Create a message
 app.post('/messages', authenticateToken, async (req, res) => {
   try {
     const { receiver, content } = req.body;
@@ -160,7 +178,7 @@ app.post('/messages', authenticateToken, async (req, res) => {
   }
 });
 
-// Get chat history between two users
+// Get message history
 app.get('/messages', authenticateToken, async (req, res) => {
   try {
     const { user1, user2 } = req.query;
@@ -179,68 +197,53 @@ app.get('/messages', authenticateToken, async (req, res) => {
   }
 });
 
-// Start socket.io server
+// --- SOCKET.IO SETUP ---
+
+const server = http.createServer(app);
 const io = new Server(server, {
-  cors: {
-    origin: '*',  // Allow all origins (for dev only)
-    methods: ['GET', 'POST'],
-  },
+  cors: { origin: '*', methods: ['GET', 'POST'] },
 });
 
-// Store connected users (in-memory)
-let users = {};
+// In‑memory maps
 let userSocketMap = {};
 
-// Connect to MongoDB
-mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/chatverse', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-}).then(() => {
-  console.log('MongoDB connected');
-  console.log('Connecting to MongoDB:', process.env.MONGO_URI);
-}).catch((err) => {
-  console.error('MongoDB connection error:', err);
-});
-
 io.on('connection', (socket) => {
-  // Get userId from query
   const userId = socket.handshake.query.userId;
   if (userId) {
     userSocketMap[userId] = socket.id;
-    console.log(`User ${userId} connected with socket ${socket.id}`);
+    console.log(`User ${userId} connected as socket ${socket.id}`);
   }
 
-  // Handle real-time message
   socket.on('send_message', async (data) => {
-    // data: { receiver, content }
     const message = {
       sender: userId,
       receiver: data.receiver,
       content: data.content,
       timestamp: new Date(),
     };
-    // Save to DB
     await Message.create(message);
 
-    // Emit to receiver if online
-    const receiverSocketId = userSocketMap[data.receiver];
-    if (receiverSocketId) {
-      io.to(receiverSocketId).emit('receive_message', message);
+    const receiverSocket = userSocketMap[data.receiver];
+    if (receiverSocket) {
+      io.to(receiverSocket).emit('receive_message', message);
     }
-    // Emit to sender for instant feedback
     socket.emit('receive_message', message);
   });
 
   socket.on('disconnect', () => {
-    if (userId) {
-      delete userSocketMap[userId];
-    }
-    console.log('User disconnected:', socket.id);
+    if (userId) delete userSocketMap[userId];
+    console.log(`User disconnected: ${socket.id}`);
   });
 });
 
-// Start server
-const PORT = 3000;
-server.listen(PORT, () => {
-  console.log(` Server running on http://localhost:${PORT}`);
+// --- DATABASE CONNECTION & SERVER LISTEN ---
+
+mongoose
+  .connect(process.env.MONGO_URI || 'mongodb://localhost:27017/chatverse')
+  .then(() => console.log('✅ MongoDB connected'))
+  .catch(err => console.error('❌ MongoDB error:', err));
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Server listening on port ${PORT}`);
 });
