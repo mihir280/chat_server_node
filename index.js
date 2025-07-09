@@ -106,7 +106,14 @@ app.put('/profile', authenticateToken, async (req, res) => {
 app.get('/users', async (req, res) => {
   try {
     const users = await User.find({}, 'name email avatar');
-    res.json(users);
+    // Map _id to id for each user
+    const usersWithId = users.map(u => ({
+      id: u._id,
+      name: u.name,
+      email: u.email,
+      avatar: u.avatar || ''
+    }));
+    res.json(usersWithId);
   } catch (err) {
     res.status(500).json({ message: 'Server error.' });
   }
